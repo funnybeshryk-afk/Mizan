@@ -1,0 +1,34 @@
+[Unit]
+Description=Mizan automation daemon (paper-trading bots)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/venv/bin/python __REPO_DIR__/daemon.py
+
+# Restart only on an actual crash (non-zero exit / killed by an unexpected
+# signal) - NOT on every exit. A graceful stop via the data/daemon.stop
+# flag file (app.automation.daemon.main()) or a rejected single-instance
+# start both return normally and exit 0, which systemd does not treat as
+# a failure, so neither is restarted here. Same design decision as the
+# Windows Task Scheduler setup in Stage 8c (LastTaskResult=0 -> no
+# restart) - this is the systemd equivalent of that, not a new policy.
+Restart=on-failure
+RestartSec=10
+
+# `systemctl stop mizan-daemon` sends SIGTERM, which the daemon already
+# handles gracefully (same code path as the stop-flag) - but systemd's
+# default 90s stop timeout would forcibly SIGKILL it if a bot's in-flight
+# poll cycle happened to still be running past that window, which the
+# stop-flag path (used directly, outside systemctl) has no such ceiling
+# on at all. This generous timeout is a safety margin for `systemctl
+# stop` specifically; `touch data/daemon.stop` remains the recommended,
+# ceiling-free way to stop - see deploy/README.md.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+PySide6==6.11.1
+SQLAlchemy>=2.0,<3.0
+pytest>=8.0
+alpaca-py>=0.44,<0.45
+python-dotenv>=1.0,<2.0
+psutil>=5.9,<6.0
+# zoneinfo (stdlib) needs an IANA tz database to resolve "America/New_York" -
+# Linux usually ships one, Windows does not, so this is a real, declared
+# dependency rather than an accidental transitive one (used for session-time
+# logic: OpeningRangeBreakoutStrategy, force_session_close).
+tzdata>=2024.1

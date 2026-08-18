@@ -1,0 +1,22 @@
+[Unit]
+Description=Mizan Telegram bot supervisor (remote notifications and control)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/venv/bin/python __REPO_DIR__/telegram_bot.py
+
+# Same restart policy as mizan-daemon.service: only an actual crash
+# restarts it. This supervisor has no flag-file stop mechanism of its
+# own (unlike the daemon) - python-telegram-bot's run_polling() already
+# shuts down cleanly on SIGTERM, so `systemctl stop` is the correct and
+# only way to stop it (see deploy/README.md).
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
