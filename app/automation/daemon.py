@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_of_day, timedelta, timezone
 from decimal import Decimal
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
@@ -210,6 +211,68 @@ def load_enabled_bots(
             continue
         bots.append(build_bot(session, config, market_provider))
     return bots
+
+
+# Tolerance for _check_alpaca_capital_consistency's comparison - purely to
+# avoid a false-positive warning from Decimal rounding noise, not because
+# any real divergence smaller than this is expected or acceptable.
+ALPACA_CAPITAL_CONSISTENCY_TOLERANCE = Decimal("0.01")
+
+
+def _check_alpaca_capital_consistency(bots: list[Bot], logger: logging.Logger) -> None:
+    """KNOWN LIMITATION (Stage 14 - see the DEFAULT_BOT_SPECS docstring in
+    app.automation.setup_bots): every alpaca_paper bot still keeps its own
+    independent local Account ledger, even though - unlike PaperBroker
+    bots, where each bot's local ledger really is its own isolated paper
+    account - every alpaca_paper bot actually submits real orders to the
+    same *shared* Alpaca paper account. That makes "sum of local
+    Account.cash across alpaca_paper bots" and "Alpaca's real cash
+    balance" two independent, legitimately divergent sources of truth for
+    how much capital exists - this function does not reconcile them, only
+    makes the divergence loud (a WARNING at every daemon startup) instead
+    of silent. Proper shared-capital accounting belongs to
+    RiskProfile.capital_allocation_pct enforcement (see its docstring),
+    part of the Paper -> Live promotion criteria, not this stage.
+
+    Never raises and never blocks daemon startup: a network/auth failure
+    while fetching Alpaca's real balance is logged as its own WARNING
+    (distinct from an actual divergence, so the two cases are never
+    conflated) and this function simply returns.
+    """
+    alpaca_bots = [b for b in bots if b.config.broker == "alpaca_paper"]
+    if not alpaca_bots:
+        return
+
+    local_total = sum((b.portfolio.cash for b in alpaca_bots), Decimal("0"))
+
+    try:
+        real_cash = alpaca_bots[0].broker.get_account_cash()
+    except BrokerError as exc:
+        logger.warning(
+            "Could not verify local/Alpaca capital consistency for %d alpaca_paper "
+            "bot(s) (%s) - failed to fetch the real Alpaca paper account balance: %s. "
+            "Skipping this check for this startup.",
+            len(alpaca_bots),
+            ", ".join(b.config.name for b in alpaca_bots),
+            exc,
+        )
+        return
+
+    if abs(local_total - real_cash) > ALPACA_CAPITAL_CONSISTENCY_TOLERANCE:
+        logger.warning(
+            "Local capital ledger diverges from Alpaca's real paper account balance: "
+            "%d alpaca_paper bot(s) (%s) sum to a local cash total of %s, but the shared "
+            "Alpaca paper account actually holds %s in cash. This is a known, expected "
+            "architectural limitation, not a bug - each bot's local Account is independent "
+            "bookkeeping inherited from before broker=\"alpaca_paper\" existed, not a claim "
+            "on a slice of the real balance, and RiskProfile.capital_allocation_pct is not "
+            "enforced across bots (see app.automation.setup_bots.DEFAULT_BOT_SPECS and "
+            "app.risk.risk_profile.RiskProfile.capital_allocation_pct docstrings).",
+            len(alpaca_bots),
+            ", ".join(b.config.name for b in alpaca_bots),
+            local_total,
+            real_cash,
+        )
 
 
 def _update_day_boundary(state: BotRuntimeState, today: date) -> None:
@@ -599,6 +662,7 @@ def run_daemon(
             return
 
         logger.info("Loaded %d bot(s): %s", len(bots), ", ".join(b.config.name for b in bots))
+        _check_alpaca_capital_consistency(bots, logger)
 
         ticks = 0
         while not shutdown_check():
@@ -627,6 +691,19 @@ def run_daemon(
         logger.info("Daemon stopped.")
 
 
+# Stage 14 (post .vscode-server disk-full incident): logs/daemon.log was a
+# plain FileHandler - unbounded, growing forever. That specific incident's
+# actual cause was unrelated (VS Code Remote-SSH server cache), but an
+# ever-growing log file is a real, separate way to eventually fill the
+# same disk, so it's closed here too rather than left as a known gap.
+# 14 days keeps roughly two weeks of history (observed growth is well
+# under 1MB/day for 5 bots - see logs/daemon.log's actual size on the VPS
+# - so 14 backups is comfortably small, not a real space concern even on
+# the VPS's 6.7GB volume) while still bounding it permanently instead of
+# relying on someone remembering to clean it up by hand.
+DAEMON_LOG_ROTATION_BACKUP_DAYS = 14
+
+
 def build_daemon_logger() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("mizan.daemon")
@@ -635,7 +712,20 @@ def build_daemon_logger() -> logging.Logger:
         formatter = logging.Formatter(
             fmt="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
-        file_handler = logging.FileHandler(LOGS_DIR / "daemon.log", encoding="utf-8")
+        # TimedRotatingFileHandler, not plain FileHandler: rotates
+        # logs/daemon.log at midnight (host-local time - same clock the
+        # %(asctime)s timestamps inside each line already use, so the
+        # rotated filename's date and the lines' own timestamps never
+        # disagree) and keeps only the last DAEMON_LOG_ROTATION_BACKUP_DAYS
+        # rotated files, deleting older ones automatically. Line format is
+        # unchanged - app.automation.log_notifier parses that format by
+        # regex and must keep working against it either way.
+        file_handler = TimedRotatingFileHandler(
+            LOGS_DIR / "daemon.log",
+            when="midnight",
+            backupCount=DAEMON_LOG_ROTATION_BACKUP_DAYS,
+            encoding="utf-8",
+        )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 

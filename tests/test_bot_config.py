@@ -107,23 +107,28 @@ def test_create_default_bots_creates_all_bots_with_separate_accounts(session):
     breakout = get_bot_config_by_name(session, "breakout-qqq")
     mean_reversion = get_bot_config_by_name(session, "meanrev-ko")
     orb = get_bot_config_by_name(session, "intraday-orb-spy")
+    # Stage 14: all 5 bots (these 4 plus intraday-orb-spy below) now trade
+    # through real Alpaca paper execution - broker="paper"/PaperBroker is
+    # still a supported value (see test_default_broker_bot_still_constructs_
+    # a_paperbroker in test_daemon.py), just no longer what any default bot
+    # uses.
     assert conservative.risk_profile_name == "CONSERVATIVE"
     assert conservative.symbol == "AAPL"
-    assert conservative.broker == "paper"
+    assert conservative.broker == "alpaca_paper"
     assert conservative.force_session_close is False
     assert aggressive.risk_profile_name == "AGGRESSIVE"
     assert aggressive.symbol == "TSLA"
-    assert aggressive.broker == "paper"
+    assert aggressive.broker == "alpaca_paper"
     assert aggressive.force_session_close is False
     assert breakout.strategy_class == "BreakoutStrategy"
     assert breakout.risk_profile_name == "CONSERVATIVE"
     assert breakout.symbol == "QQQ"
-    assert breakout.broker == "paper"
+    assert breakout.broker == "alpaca_paper"
     assert breakout.force_session_close is False
     assert mean_reversion.strategy_class == "MeanReversionStrategy"
     assert mean_reversion.risk_profile_name == "CONSERVATIVE"
     assert mean_reversion.symbol == "KO"
-    assert mean_reversion.broker == "paper"
+    assert mean_reversion.broker == "alpaca_paper"
     assert mean_reversion.force_session_close is False
 
     # The new intraday bot: real Alpaca paper execution, 1-minute bars,

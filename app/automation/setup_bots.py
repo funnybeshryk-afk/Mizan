@@ -39,30 +39,49 @@ class BotSpec:
 # anywhere (see its docstring in app/risk/risk_profile.py), so each gets
 # its own full, independent paper account regardless of how many other
 # bots use the same risk_profile_name.
+#
+# KNOWN LIMITATION (Stage 14): all 5 bots below now use broker=
+# "alpaca_paper", meaning all 5 submit real orders to the *same* shared
+# Alpaca paper account - yet each still has its own independent local
+# Account ledger here (DEFAULT_BOT_INITIAL_CASH each), inherited unchanged
+# from when only PaperBroker bots existed and every bot's local ledger WAS
+# the only source of truth. The local ledgers and Alpaca's real balance are
+# now two independent, divergent sources of truth for "how much capital
+# does this bot have" - summing the 5 local accounts will not equal
+# Alpaca's real balance, and nothing here reconciles that. This is
+# deliberate, not a bug: proper shared-capital accounting belongs to
+# RiskProfile.capital_allocation_pct enforcement (see its docstring), part
+# of the Paper -> Live promotion criteria, not this stage. See
+# app.automation.daemon._check_alpaca_capital_consistency, which logs a
+# warning at every daemon startup so this divergence is loud, not silent.
 DEFAULT_BOT_SPECS: list[BotSpec] = [
     BotSpec(
         name="conservative-aapl",
         strategy_class="TrendStrategy",
         risk_profile_name="CONSERVATIVE",
         symbol="AAPL",
+        broker="alpaca_paper",
     ),
     BotSpec(
         name="aggressive-tsla",
         strategy_class="TrendStrategy",
         risk_profile_name="AGGRESSIVE",
         symbol="TSLA",
+        broker="alpaca_paper",
     ),
     BotSpec(
         name="breakout-qqq",
         strategy_class="BreakoutStrategy",
         risk_profile_name="CONSERVATIVE",
         symbol="QQQ",
+        broker="alpaca_paper",
     ),
     BotSpec(
         name="meanrev-ko",
         strategy_class="MeanReversionStrategy",
         risk_profile_name="CONSERVATIVE",
         symbol="KO",
+        broker="alpaca_paper",
     ),
     # First intraday bot (Stage 13): real Alpaca paper execution (not the
     # internal PaperBroker every other bot above uses), 1-minute bars, a

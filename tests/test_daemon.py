@@ -151,7 +151,15 @@ def session():
 
 
 def _make_bot_config(
-    session, *, name, symbol, risk_profile_name, poll_interval_seconds=60, force_session_close=False
+    session,
+    *,
+    name,
+    symbol,
+    risk_profile_name,
+    poll_interval_seconds=60,
+    force_session_close=False,
+    broker="paper",
+    initial_cash=Decimal("10000"),
 ):
     spec = BotSpec(
         name=name,
@@ -159,9 +167,10 @@ def _make_bot_config(
         risk_profile_name=risk_profile_name,
         symbol=symbol,
         poll_interval_seconds=poll_interval_seconds,
-        initial_cash=Decimal("10000"),
+        initial_cash=initial_cash,
         strategy_params=SMALL_PARAMS,
         force_session_close=force_session_close,
+        broker=broker,
     )
     return create_bot(session, spec)
 
@@ -392,8 +401,9 @@ def test_alpaca_paper_bot_constructs_alpacabroker_with_no_paper_argument_at_all(
 
 def test_default_broker_bot_still_constructs_a_paperbroker(session):
     """Regression: a BotConfig without an explicit broker (or broker=
-    "paper", exactly how all 4 live bots were created) must keep
-    constructing PaperBroker, unchanged."""
+    "paper") must keep constructing PaperBroker, unchanged - broker=
+    "paper" is still a legitimate, supported value even though every bot
+    in DEFAULT_BOT_SPECS has since moved to "alpaca_paper" (Stage 14)."""
     bot_config = _make_bot_config(session, name="conservative-aapl", symbol="AAPL", risk_profile_name="CONSERVATIVE")
     assert bot_config.broker == "paper"
 
@@ -401,6 +411,208 @@ def test_default_broker_bot_still_constructs_a_paperbroker(session):
     bot = build_bot(session, bot_config, provider)
 
     assert isinstance(bot.broker, daemon_module.PaperBroker)
+
+
+# --- _check_alpaca_capital_consistency (Stage 14) ----------------------------
+
+
+class _SpyCapitalAlpacaBroker:
+    """Test double standing in for AlpacaBroker: only get_account_cash()
+    matters here, so nothing else is implemented."""
+
+    def __init__(self, real_cash=None, raise_on_get_account_cash=None):
+        self._real_cash = real_cash
+        self._raise_on_get_account_cash = raise_on_get_account_cash
+
+    def get_account_cash(self):
+        if self._raise_on_get_account_cash is not None:
+            raise self._raise_on_get_account_cash
+        return self._real_cash
+
+    def sync_pending_orders(self):
+        return []
+
+
+def _make_alpaca_bot(session, monkeypatch, *, name, symbol, initial_cash, real_cash=None, raise_on_get_account_cash=None):
+    """Builds an alpaca_paper Bot without ever touching real Alpaca
+    credentials: AlpacaBroker's constructor is monkeypatched to a no-op
+    stand-in for the duration of build_bot(), then the resulting bot's
+    broker is swapped for _SpyCapitalAlpacaBroker so get_account_cash()
+    returns exactly what the test wants, without a network call."""
+    bot_config = _make_bot_config(
+        session,
+        name=name,
+        symbol=symbol,
+        risk_profile_name="CONSERVATIVE",
+        broker="alpaca_paper",
+        initial_cash=initial_cash,
+    )
+
+    class _NoOpAlpacaBroker:
+        def __init__(self, portfolio):
+            pass
+
+        def sync_pending_orders(self):
+            return []
+
+    monkeypatch.setattr(daemon_module, "AlpacaBroker", _NoOpAlpacaBroker)
+    bot = build_bot(session, bot_config, market_provider=None)
+    bot.broker = _SpyCapitalAlpacaBroker(
+        real_cash=real_cash, raise_on_get_account_cash=raise_on_get_account_cash
+    )
+    return bot
+
+
+def test_capital_consistency_check_is_a_no_op_without_any_alpaca_paper_bots(session, caplog):
+    bot = _make_bot_config(session, name="conservative-aapl", symbol="AAPL", risk_profile_name="CONSERVATIVE")
+    provider = FakeMarketDataProvider({"AAPL": _bars_from_closes(FLAT_CLOSES)})
+    paper_bot = build_bot(session, bot, provider)
+
+    logger = logging.getLogger("test.daemon.capital.none")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.none"):
+        daemon_module._check_alpaca_capital_consistency([paper_bot], logger)
+
+    assert caplog.text == ""
+
+
+def test_capital_consistency_check_warns_on_a_real_divergence(session, caplog, monkeypatch):
+    bot = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="intraday-orb-spy",
+        symbol="SPY",
+        initial_cash=Decimal("10000"),
+        real_cash=Decimal("87654.32"),
+    )
+
+    logger = logging.getLogger("test.daemon.capital.mismatch")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.mismatch"):
+        daemon_module._check_alpaca_capital_consistency([bot], logger)
+
+    assert "diverges" in caplog.text
+    assert "10000" in caplog.text
+    assert "87654.32" in caplog.text
+    assert "intraday-orb-spy" in caplog.text
+
+
+def test_capital_consistency_check_sums_local_cash_across_every_alpaca_paper_bot(session, caplog, monkeypatch):
+    """The local side of the comparison must be the sum across every
+    alpaca_paper bot, not just one - all of them share the same real
+    Alpaca account, so only their combined total is comparable to it."""
+    bot_a = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="conservative-aapl",
+        symbol="AAPL",
+        initial_cash=Decimal("10000"),
+        real_cash=Decimal("20000"),
+    )
+    bot_b = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="aggressive-tsla",
+        symbol="TSLA",
+        initial_cash=Decimal("10000"),
+        real_cash=Decimal("20000"),
+    )
+
+    logger = logging.getLogger("test.daemon.capital.sum")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.sum"):
+        daemon_module._check_alpaca_capital_consistency([bot_a, bot_b], logger)
+
+    # 10000 + 10000 == 20000 == real_cash -> no divergence, nothing logged.
+    assert caplog.text == ""
+
+
+def test_capital_consistency_check_logs_nothing_when_totals_match(session, caplog, monkeypatch):
+    bot = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="intraday-orb-spy",
+        symbol="SPY",
+        initial_cash=Decimal("10000"),
+        real_cash=Decimal("10000"),
+    )
+
+    logger = logging.getLogger("test.daemon.capital.match")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.match"):
+        daemon_module._check_alpaca_capital_consistency([bot], logger)
+
+    assert caplog.text == ""
+
+
+def test_capital_consistency_check_logs_nothing_within_the_rounding_tolerance(session, caplog, monkeypatch):
+    bot = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="intraday-orb-spy",
+        symbol="SPY",
+        initial_cash=Decimal("10000"),
+        real_cash=Decimal("10000.005"),
+    )
+
+    logger = logging.getLogger("test.daemon.capital.tolerance")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.tolerance"):
+        daemon_module._check_alpaca_capital_consistency([bot], logger)
+
+    assert caplog.text == ""
+
+
+def test_capital_consistency_check_does_not_raise_or_block_startup_when_alpaca_is_unreachable(
+    session, caplog, monkeypatch
+):
+    from app.broker.broker import NetworkError
+
+    bot = _make_alpaca_bot(
+        session,
+        monkeypatch,
+        name="intraday-orb-spy",
+        symbol="SPY",
+        initial_cash=Decimal("10000"),
+        raise_on_get_account_cash=NetworkError("Could not reach Alpaca: timeout"),
+    )
+
+    logger = logging.getLogger("test.daemon.capital.unreachable")
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.unreachable"):
+        daemon_module._check_alpaca_capital_consistency([bot], logger)  # must not raise
+
+    assert "Could not verify local/Alpaca capital consistency" in caplog.text
+    # This is the "check itself failed" message, never a false-positive divergence claim.
+    assert "diverges" not in caplog.text
+
+
+def test_capital_consistency_check_runs_automatically_on_daemon_startup(session, caplog, monkeypatch):
+    """End-to-end: run_daemon() itself must invoke the check on startup,
+    not just have it available for tests to call directly."""
+    bot_config = _make_bot_config(
+        session, name="intraday-orb-spy", symbol="SPY", risk_profile_name="CONSERVATIVE", broker="alpaca_paper"
+    )
+
+    class SpyAlpacaBroker:
+        def __init__(self, portfolio):
+            pass
+
+        def get_account_cash(self):
+            return Decimal("999999")
+
+        def sync_pending_orders(self):
+            return []
+
+    monkeypatch.setattr(daemon_module, "AlpacaBroker", SpyAlpacaBroker)
+    provider = FakeMarketDataProvider({"SPY": _bars_from_closes(FLAT_CLOSES)})
+    logger = logging.getLogger("test.daemon.capital.startup")
+
+    with caplog.at_level(logging.WARNING, logger="test.daemon.capital.startup"):
+        run_daemon(
+            session_factory=lambda: session,
+            market_provider_factory=lambda s: provider,
+            clock=FakeClock(),
+            logger=logger,
+            max_ticks=1,
+        )
+
+    assert "diverges" in caplog.text
+    assert "999999" in caplog.text
 
 
 def test_run_bot_cycle_calls_sync_pending_orders_before_evaluating_the_strategy(session):

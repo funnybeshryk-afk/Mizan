@@ -210,6 +210,22 @@ class AlpacaBroker(Broker):
         order.fill_price = fill_price
         self.session.commit()
 
+    def get_account_cash(self) -> Decimal:
+        """Real cash balance of the shared Alpaca paper account this broker
+        instance is authenticated against. Used only by
+        app.automation.daemon._check_alpaca_capital_consistency (a
+        startup-time sanity check comparing this against the sum of local
+        Account.cash across every alpaca_paper bot) - never for sizing,
+        order execution, or anything else on the hot path.
+        """
+        try:
+            account = self._client.get_account()
+        except APIError as exc:
+            raise self._translate_api_error(exc) from exc
+        except RequestException as exc:
+            raise NetworkError(f"Could not reach Alpaca: {exc}") from exc
+        return _to_decimal(account.cash)
+
     def orders(self, limit: int | None = None) -> list[Order]:
         query = (
             select(Order)

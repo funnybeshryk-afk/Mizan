@@ -112,6 +112,32 @@ sudo systemctl enable --now mizan-daemon mizan-telegram-bot
 every boot - the systemd equivalent of the Windows Task Scheduler "at system
 startup" trigger from Stage 8c.
 
+## 6. Log rotation (daemon.log + journald)
+
+Two independent log sinks exist for the daemon - both need to be bounded,
+not just one, or an unbounded log is a way to fill the disk all over again:
+
+- **`logs/daemon.log`**: rotated by the app itself
+  (`TimedRotatingFileHandler` in `app.automation.daemon.build_daemon_logger()`)
+  - daily, 14 days kept, automatically, on every platform (dev machine or
+    VPS alike). No system-level configuration needed for this one.
+- **journald** (the daemon's stdout/stderr - the unit sets no
+  `StandardOutput=`/`StandardError=` override, so systemd captures both
+  into the journal by default): install the provided drop-in once per
+  server -
+
+  ```bash
+  sudo mkdir -p /etc/systemd/journald.conf.d
+  sudo cp deploy/journald-mizan.conf /etc/systemd/journald.conf.d/mizan.conf
+  sudo systemctl restart systemd-journald
+  ```
+
+  Caps total journal storage at 200M (`SystemMaxUse=`) - system-wide, since
+  journald has no true per-unit persistent size cap, but generous relative
+  to typical usage and nowhere close to filling a small VPS disk even if
+  left unattended indefinitely. Check current usage any time with
+  `journalctl --disk-usage`.
+
 ## Checking status
 
 ```bash

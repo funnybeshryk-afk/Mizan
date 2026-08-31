@@ -17,11 +17,13 @@ from app.portfolio.portfolio import Portfolio
 class FakeTradingClient:
     """No-network stand-in for alpaca.trading.client.TradingClient."""
 
-    def __init__(self, raise_on_submit=None):
+    def __init__(self, raise_on_submit=None, raise_on_get_account=None, account_cash="10000"):
         self.submitted_requests = []
         self._orders: dict[str, SimpleNamespace] = {}
         self._next_id = 1
         self._raise_on_submit = raise_on_submit
+        self._raise_on_get_account = raise_on_get_account
+        self._account_cash = account_cash
 
     def submit_order(self, order_data):
         self.submitted_requests.append(order_data)
@@ -41,6 +43,11 @@ class FakeTradingClient:
 
     def get_order_by_id(self, order_id):
         return self._orders[str(order_id)]
+
+    def get_account(self):
+        if self._raise_on_get_account is not None:
+            raise self._raise_on_get_account
+        return SimpleNamespace(cash=self._account_cash)
 
     def set_status(self, order_id, status, filled_avg_price=None, filled_qty=None, filled_at=None):
         order = self._orders[str(order_id)]
@@ -311,6 +318,39 @@ def test_trading_client_is_always_constructed_with_paper_true(monkeypatch, portf
 
     assert captured["paper"] is True
     assert captured["api_key"] == "fake-key"
+
+
+# --- get_account_cash ---------------------------------------------------------
+
+
+def test_get_account_cash_returns_the_brokers_real_cash_balance(portfolio):
+    fake_client = FakeTradingClient(account_cash="54321.55")
+    broker = AlpacaBroker(portfolio, client=fake_client)
+
+    assert broker.get_account_cash() == Decimal("54321.55")
+
+
+def test_get_account_cash_translates_an_api_error(portfolio):
+    import json
+
+    from alpaca.common.exceptions import APIError
+
+    body = json.dumps({"code": 40010001, "message": "request is not authorized"})
+    fake_client = FakeTradingClient(raise_on_get_account=APIError(body))
+    broker = AlpacaBroker(portfolio, client=fake_client)
+
+    with pytest.raises(BrokerError):
+        broker.get_account_cash()
+
+
+def test_get_account_cash_translates_a_network_error(portfolio):
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    fake_client = FakeTradingClient(raise_on_get_account=RequestsConnectionError("boom"))
+    broker = AlpacaBroker(portfolio, client=fake_client)
+
+    with pytest.raises(BrokerError):
+        broker.get_account_cash()
 
 
 def test_broker_bound_to_a_different_account_is_rejected(portfolio, broker):
